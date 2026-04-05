@@ -1,10 +1,26 @@
 const express = require('express');
-const { chromium } = require('playwright');
+const axios = require('axios').default;
+const { wrapper } = require('axios-cookiejar-support');
+const { CookieJar } = require('tough-cookie');
+const cheerio = require('cheerio');
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
+
+const BASE_URL = 'https://qpublic.schneidercorp.com/Application.aspx';
+const SEARCH_URL =
+  BASE_URL + '?App=PauldingCountyGA&Layer=Parcels&PageType=Search';
+
+const HEADERS = {
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+    '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  Accept:
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+};
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => res.json({ ok: true }));
@@ -12,176 +28,149 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 // ── Property lookup ───────────────────────────────────────────────────────────
 app.post('/api/property-lookup', async (req, res) => {
   const { streetNumber, streetName } = req.body;
-
   if (!streetNumber || !streetName) {
     return res.status(400).json({ error: 'streetNumber and streetName are required' });
   }
 
-  console.log(`[lookup] ${streetNumber} ${streetName}`);
+  console.log(`[lookup] "${streetNumber} ${streetName}"`);
 
-  let browser;
   try {
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    // Each request gets its own cookie jar so sessions don't bleed between calls
+    const jar = new CookieJar();
+    const client = wrapper(axios.create({ jar, headers: HEADERS }));
+
+    // ── 1. Load the search page (establishes session + grabs ViewState) ───────
+    const searchPage = await client.get(SEARCH_URL);
+    const $s = cheerio.load(searchPage.data);
+
+    const viewState          = $s('input[name="__VIEWSTATE"]').val() || '';
+    const viewStateGen       = $s('input[name="__VIEWSTATEGENERATOR"]').val() || '';
+    const eventValidation    = $s('input[name="__EVENTVALIDATION"]').val() || '';
+
+    if (!viewState) {
+      console.warn('[lookup] Could not find __VIEWSTATE — page structure may have changed');
+    }
+
+    // Find the street-number and street-name input names dynamically
+    // (ASP.NET WebForms generates long IDs like ctl00_ContentPlaceHolder1_...)
+    const stNoName   = findInputName($s, /stno|streetno|street_no|stnum/i)   || 'stno';
+    const stNameName = findInputName($s, /stname|streetname|street_name/i)   || 'stname';
+    const searchBtnName = findSubmitName($s) || 'btnSearch';
+
+    console.log(`[lookup] form fields: stNo="${stNoName}" stName="${stNameName}" btn="${searchBtnName}"`);
+
+    // ── 2. Submit the address search ──────────────────────────────────────────
+    const formData = new URLSearchParams();
+    formData.append('__VIEWSTATE',          viewState);
+    formData.append('__VIEWSTATEGENERATOR', viewStateGen);
+    formData.append('__EVENTVALIDATION',    eventValidation);
+    formData.append(stNoName,   streetNumber);
+    formData.append(stNameName, streetName);
+    formData.append(searchBtnName, 'Search');
+
+    const resultsPage = await client.post(SEARCH_URL, formData.toString(), {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     });
-    const context = await browser.newContext({
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-        '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    });
-    const page = await context.newPage();
 
-    // ── 1. Navigate to search page ────────────────────────────────────────────
-    await page.goto(
-      'https://qpublic.schneidercorp.com/Application.aspx' +
-        '?App=PauldingCountyGA&Layer=Parcels&PageType=Search',
-      { waitUntil: 'networkidle', timeout: 30_000 }
-    );
+    const $r = cheerio.load(resultsPage.data);
 
-    // ── 2. Fill street number ─────────────────────────────────────────────────
-    const stNoInput = await findInput(page, [
-      '[id*="txtStNo"]',
-      '[id*="StNo"]',
-      '[name*="stno" i]',
-      'input[placeholder*="number" i]',
-    ]);
-    if (!stNoInput) {
-      // Last resort: label-based
-      await page.getByLabel(/street\s*#|street\s*no|house\s*no/i).first().fill(streetNumber);
-    } else {
-      await stNoInput.fill(streetNumber);
-    }
-
-    // ── 3. Fill street name ───────────────────────────────────────────────────
-    const stNameInput = await findInput(page, [
-      '[id*="txtStName"]',
-      '[id*="StName"]',
-      '[name*="stname" i]',
-      'input[placeholder*="street name" i]',
-    ]);
-    if (!stNameInput) {
-      await page.getByLabel(/street\s*name/i).first().fill(streetName);
-    } else {
-      await stNameInput.fill(streetName);
-    }
-
-    // ── 4. Submit the search form ─────────────────────────────────────────────
-    const searchBtn = await findInput(page, [
-      'input[value="Search" i]',
-      'button:has-text("Search")',
-      '[id*="btnSearch"]',
-      '[id*="cmdSearch"]',
-    ]);
-    if (searchBtn) {
-      await searchBtn.click();
-    } else {
-      await page.keyboard.press('Enter');
-    }
-
-    await page.waitForLoadState('networkidle', { timeout: 20_000 });
-
-    // ── 5. Click the first result ─────────────────────────────────────────────
-    const resultLink = await findInput(page, [
-      // Schneider qpublic result tables typically have links in the second+ rows
-      'table[id*="Grid"] tr:nth-child(2) a',
-      'table[id*="Result"] tr:nth-child(2) a',
-      'table[id*="Search"] tr:nth-child(2) a',
-      '.SearchResults tr:nth-child(2) a',
-      // Fallback: any detail/parcel link
-      'a[href*="PageType=Detail"]',
-      'a[href*="ParcelID"]',
-      'a[href*="PIN="]',
-    ]);
-
-    if (!resultLink) {
+    // ── 3. Find the first result link ─────────────────────────────────────────
+    const resultHref = findFirstResultHref($r);
+    if (!resultHref) {
       return res.status(404).json({ error: 'No results found for this address.' });
     }
 
-    await resultLink.click();
-    await page.waitForLoadState('networkidle', { timeout: 20_000 });
+    const detailURL = resultHref.startsWith('http')
+      ? resultHref
+      : 'https://qpublic.schneidercorp.com/' + resultHref.replace(/^\//, '');
 
-    // ── 6. Scrape owner name & year built ─────────────────────────────────────
-    const ownerName = await scrapeFieldByLabel(page, /owner\s*name|owner/i);
-    const yearBuilt = await scrapeFieldByLabel(page, /year\s*built/i);
+    console.log(`[lookup] detail URL: ${detailURL}`);
+
+    // ── 4. Load the property detail page ─────────────────────────────────────
+    const detailPage = await client.get(detailURL);
+    const $d = cheerio.load(detailPage.data);
+
+    const ownerName = scrapeLabel($d, /owner\s*name|owner/i);
+    const yearBuilt = scrapeLabel($d, /year\s*built/i);
 
     if (!ownerName && !yearBuilt) {
-      return res.status(404).json({ error: 'Property detail found but data could not be read.' });
+      return res
+        .status(404)
+        .json({ error: 'Property found but data could not be read. The page layout may have changed.' });
     }
 
     console.log(`[lookup] owner="${ownerName}" yearBuilt="${yearBuilt}"`);
-    res.json({
-      ownerName: ownerName || 'N/A',
-      yearBuilt: yearBuilt || 'N/A',
-    });
+    res.json({ ownerName: ownerName || 'N/A', yearBuilt: yearBuilt || 'N/A' });
   } catch (err) {
     console.error('[lookup] error:', err.message);
     res.status(500).json({ error: err.message });
-  } finally {
-    if (browser) await browser.close();
   }
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/**
- * Try each selector in order and return the first matching Locator, or null.
- */
-async function findInput(page, selectors) {
-  for (const sel of selectors) {
-    try {
-      const loc = page.locator(sel).first();
-      if ((await loc.count()) > 0) return loc;
-    } catch (_) {
-      // selector may throw if syntax is invalid on this page — skip
+/** Find an <input> whose name or id matches a regex, return its `name` attribute */
+function findInputName($, regex) {
+  let found = null;
+  $('input[type="text"], input:not([type])').each((_, el) => {
+    const name = $(el).attr('name') || '';
+    const id   = $(el).attr('id')   || '';
+    if (regex.test(name) || regex.test(id)) { found = name; return false; }
+  });
+  return found;
+}
+
+/** Find the search submit button's name */
+function findSubmitName($) {
+  let found = null;
+  $('input[type="submit"], button[type="submit"]').each((_, el) => {
+    const val  = $(el).val()       || '';
+    const name = $(el).attr('name') || '';
+    const id   = $(el).attr('id')  || '';
+    if (/search/i.test(val) || /search/i.test(name) || /search/i.test(id)) {
+      found = name; return false;
     }
+  });
+  return found;
+}
+
+/** Find the first property-detail link in a results table */
+function findFirstResultHref($) {
+  // Schneider qpublic results are in a GridView table; skip the header row
+  const candidates = [
+    'table[id*="Grid"] tr:nth-child(2) a',
+    'table[id*="Result"] tr:nth-child(2) a',
+    'table[id*="Search"] tr:nth-child(2) a',
+    '.SearchResults tr:nth-child(2) a',
+    'a[href*="PageType=Detail"]',
+    'a[href*="ParcelID"]',
+    'a[href*="PIN="]',
+  ];
+  for (const sel of candidates) {
+    const href = $(sel).first().attr('href');
+    if (href) return href;
   }
   return null;
 }
 
-/**
- * Search every <tr> for a cell whose text matches labelRegex.
- * If found, return the trimmed text of the NEXT sibling <td>.
- * Also handles <th>/<td> label-value pairs in the same row.
- */
-async function scrapeFieldByLabel(page, labelRegex) {
-  // Strategy 1: rows where first cell is the label
-  const rows = page.locator('tr');
-  const rowCount = await rows.count();
-
-  for (let i = 0; i < rowCount; i++) {
-    const cells = rows.nth(i).locator('th, td');
-    const cellCount = await cells.count();
-    for (let c = 0; c < cellCount - 1; c++) {
-      const labelText = (await cells.nth(c).textContent()) || '';
-      if (labelRegex.test(labelText.trim())) {
-        const value = (await cells.nth(c + 1).textContent()) || '';
-        const cleaned = value.trim().replace(/\s+/g, ' ');
-        if (cleaned) return cleaned;
+/** Search every table row for a cell whose text matches labelRegex; return the next cell's text */
+function scrapeLabel($, labelRegex) {
+  let value = null;
+  $('tr').each((_, row) => {
+    const cells = $(row).find('td, th');
+    cells.each((i, cell) => {
+      const text = $(cell).text().trim();
+      if (labelRegex.test(text) && i < cells.length - 1) {
+        const candidate = $(cells[i + 1]).text().trim().replace(/\s+/g, ' ');
+        if (candidate) { value = candidate; return false; }
       }
-    }
-  }
-
-  // Strategy 2: look for a <span> or <div> that directly follows a label element
-  const labelEls = page.locator(`td, th, span, div, label`);
-  const labelCount = await labelEls.count();
-  for (let i = 0; i < labelCount; i++) {
-    const text = (await labelEls.nth(i).textContent()) || '';
-    if (labelRegex.test(text.trim())) {
-      // Try the immediately following sibling
-      const sibling = labelEls.nth(i + 1);
-      if ((await sibling.count()) > 0) {
-        const val = ((await sibling.textContent()) || '').trim().replace(/\s+/g, ' ');
-        if (val) return val;
-      }
-    }
-  }
-
-  return null;
+    });
+    if (value) return false;
+  });
+  return value;
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Servpro property lookup server listening on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`Servpro property lookup server on port ${PORT}`);
 });

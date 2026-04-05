@@ -49,6 +49,55 @@ app.get('/debug/form', async (_req, res) => {
   }
 });
 
+// ── Debug: search and return result links ─────────────────────────────────────
+app.get('/debug/search', async (req, res) => {
+  const address = req.query.address || '100 Dallas';
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+    });
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    });
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    });
+    const page = await context.newPage();
+    await page.goto(SEARCH_URL, { waitUntil: 'networkidle', timeout: 30_000 });
+
+    // Dismiss modals
+    for (let i = 0; i < 5; i++) {
+      try {
+        const modal = page.locator('.modal.in').first();
+        if (!(await modal.isVisible({ timeout: 2_000 }))) break;
+        const btn = modal.locator('button:has-text("Accept"), button:has-text("OK"), button:has-text("Close"), button:has-text("Continue"), .btn-primary, [data-dismiss="modal"]').first();
+        if (await btn.isVisible({ timeout: 1_000 })) await btn.click();
+        else await page.keyboard.press('Escape');
+        await page.waitForFunction(() => document.querySelectorAll('.modal.in').length === 0, { timeout: 3_000 }).catch(() => {});
+      } catch (_) { break; }
+    }
+
+    await page.fill('#ctlBodyPane_ctl01_ctl01_txtAddress', address);
+    await page.locator('#ctlBodyPane_ctl01_ctl01_btnSearch').click();
+    await page.waitForLoadState('networkidle', { timeout: 20_000 });
+
+    const links = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('a[href]')).map(a => ({
+        text: a.textContent.trim().substring(0, 80),
+        href: a.href,
+      })).filter(l => l.text)
+    );
+    const url = page.url();
+    res.json({ url, resultCount: links.length, links: links.slice(0, 30) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (browser) await browser.close();
+  }
+});
+
 // ── Property lookup ───────────────────────────────────────────────────────────
 app.post('/api/property-lookup', async (req, res) => {
   const { streetNumber, streetName } = req.body;

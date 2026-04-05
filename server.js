@@ -1,126 +1,34 @@
 const express = require('express');
-const { chromium } = require('playwright');
+const { chromium } = require('playwright-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+chromium.use(StealthPlugin());
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
 
-const SEARCH_URL =
-  'https://qpublic.schneidercorp.com/Application.aspx' +
-  '?App=PauldingCountyGA&Layer=Parcels&PageType=Search';
-
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// ── Debug: inspect search page form ──────────────────────────────────────────
-app.get('/debug/form', async (_req, res) => {
-  let browser;
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-    });
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    });
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    });
-    const page = await context.newPage();
-    await page.goto(SEARCH_URL, { waitUntil: 'load', timeout: 30_000 });
-    await page.waitForTimeout(1500);
-
-    // Return all inputs and their name/id/placeholder/type
-    const inputs = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('input, select, textarea')).map(el => ({
-        tag:  el.tagName,
-        type: el.type,
-        name: el.name,
-        id:   el.id,
-        placeholder: el.placeholder,
-        value: el.value,
-      }))
-    );
-    res.json({ url: page.url(), inputs });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  } finally {
-    if (browser) await browser.close();
-  }
-});
-
-// ── Debug: search and return result links ─────────────────────────────────────
-app.get('/debug/search', async (req, res) => {
-  const address = req.query.address || '100 Dallas';
-  let browser;
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-    });
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    });
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    });
-    const page = await context.newPage();
-    await page.goto(SEARCH_URL, { waitUntil: 'load', timeout: 30_000 });
-    await page.waitForTimeout(1500);
-
-    // Dismiss modals
-    for (let i = 0; i < 5; i++) {
-      try {
-        const modal = page.locator('.modal.in').first();
-        if (!(await modal.isVisible({ timeout: 2_000 }))) break;
-        const btn = modal.locator('button:has-text("Accept"), button:has-text("OK"), button:has-text("Close"), button:has-text("Continue"), .btn-primary, [data-dismiss="modal"]').first();
-        if (await btn.isVisible({ timeout: 1_000 })) await btn.click();
-        else await page.keyboard.press('Escape');
-        await page.waitForFunction(() => document.querySelectorAll('.modal.in').length === 0, { timeout: 3_000 }).catch(() => {});
-      } catch (_) { break; }
-    }
-
-    await page.fill('#ctlBodyPane_ctl01_ctl01_txtAddress', address);
-    await page.locator('#ctlBodyPane_ctl01_ctl01_btnSearch').click();
-    await page.waitForLoadState('load', { timeout: 20_000 });
-    await page.waitForTimeout(2000);
-
-    const links = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('a[href]')).map(a => ({
-        text: a.textContent.trim().substring(0, 80),
-        href: a.href,
-      })).filter(l => l.text)
-    );
-    const url = page.url();
-    res.json({ url, resultCount: links.length, links: links.slice(0, 30) });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  } finally {
-    if (browser) await browser.close();
-  }
-});
-
-// ── Property lookup ───────────────────────────────────────────────────────────
+// ── Property lookup via Zillow ────────────────────────────────────────────────
 app.post('/api/property-lookup', async (req, res) => {
-  const { streetNumber, streetName } = req.body;
-  if (!streetNumber || !streetName) {
-    return res.status(400).json({ error: 'streetNumber and streetName are required' });
+  const { streetAddress, city, state, zip } = req.body;
+  if (!streetAddress) {
+    return res.status(400).json({ error: 'streetAddress is required' });
   }
 
-  console.log(`[lookup] "${streetNumber} ${streetName}"`);
+  // Build Zillow search URL
+  const query = [streetAddress, city, state, zip].filter(Boolean).join(', ');
+  const slug  = query.replace(/[^\w\s]/g, '').replace(/\s+/g, '-');
+  const url   = `https://www.zillow.com/homes/${slug}_rb/`;
+  console.log(`[lookup] ${query} → ${url}`);
 
   let browser;
   try {
     browser = await chromium.launch({
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-blink-features=AutomationControlled',
-      ],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
 
     const context = await browser.newContext({
@@ -131,96 +39,32 @@ app.post('/api/property-lookup', async (req, res) => {
       locale: 'en-US',
     });
 
-    // Hide webdriver flag
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    const page = await context.newPage();
+    await page.goto(url, { waitUntil: 'load', timeout: 30_000 });
+    await page.waitForTimeout(3000);
+
+    // Zillow embeds all property data in a <script id="__NEXT_DATA__"> tag
+    const yearBuilt = await page.evaluate(() => {
+      try {
+        const el = document.getElementById('__NEXT_DATA__');
+        if (!el) return null;
+        const json = JSON.parse(el.textContent);
+
+        // Walk the tree — yearBuilt can be nested a few levels deep
+        const str = JSON.stringify(json);
+        const match = str.match(/"yearBuilt"\s*:\s*(\d{4})/);
+        return match ? match[1] : null;
+      } catch (_) {
+        return null;
+      }
     });
 
-    const page = await context.newPage();
-
-    // ── 1. Load search page ───────────────────────────────────────────────────
-    await page.goto(SEARCH_URL, { waitUntil: 'load', timeout: 30_000 });
-    await page.waitForTimeout(1500);
-
-    // ── 2. Dismiss any modals (Terms, Notices, etc.) ─────────────────────────
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        const modal = page.locator('.modal.in').first();
-        if (!(await modal.isVisible({ timeout: 3_000 }))) break;
-
-        console.log(`[lookup] dismissing modal (attempt ${attempt + 1})`);
-
-        // Try clicking a close/accept button inside the modal
-        const closeBtn = modal.locator(
-          'button:has-text("Accept"), button:has-text("Agree"), ' +
-          'button:has-text("OK"), button:has-text("Close"), ' +
-          'button:has-text("Continue"), .btn-primary, button.close, [data-dismiss="modal"]'
-        ).first();
-
-        if (await closeBtn.isVisible({ timeout: 1_000 })) {
-          await closeBtn.click();
-        } else {
-          await page.keyboard.press('Escape');
-        }
-
-        await page.waitForFunction(
-          () => document.querySelectorAll('.modal.in').length === 0,
-          { timeout: 5_000 }
-        ).catch(() => {});
-
-      } catch (_) {
-        break;
-      }
+    if (!yearBuilt) {
+      return res.status(404).json({ error: 'Property not found on Zillow or year built unavailable.' });
     }
 
-    // ── 3. Fill full address into the single address field ────────────────────
-    const fullAddress = `${streetNumber} ${streetName}`;
-    await page.fill('#ctlBodyPane_ctl01_ctl01_txtAddress', fullAddress);
-
-    // ── 4. Submit — try button first, fall back to Enter ─────────────────────
-    const searchBtn = await findInput(page, [
-      '#ctlBodyPane_ctl01_ctl01_btnSearch',
-      'input[id*="ctl01"][value*="Search" i]',
-      'button[id*="ctl01"]:has-text("Search")',
-      'input[value="Search" i]',
-      'button:has-text("Search")',
-    ]);
-    if (searchBtn) {
-      await searchBtn.click();
-    } else {
-      await page.locator('#ctlBodyPane_ctl01_ctl01_txtAddress').press('Enter');
-    }
-    await page.waitForLoadState('load', { timeout: 20_000 });
-    await page.waitForTimeout(2000);
-
-    // ── 5. Click first result ────────────────────────────────────────────────
-    const resultLink = await findInput(page, [
-      'table[id*="Grid"] tr:nth-child(2) a',
-      'table[id*="Result"] tr:nth-child(2) a',
-      'table[id*="Search"] tr:nth-child(2) a',
-      '.SearchResults tr:nth-child(2) a',
-      'a[href*="PageType=Detail"]',
-      'a[href*="ParcelID"]',
-    ]);
-
-    if (!resultLink) {
-      return res.status(404).json({ error: 'No results found for this address.' });
-    }
-
-    await resultLink.click();
-    await page.waitForLoadState('load', { timeout: 20_000 });
-    await page.waitForTimeout(2000);
-
-    // ── 6. Scrape owner & year built ──────────────────────────────────────────
-    const ownerName = await scrapeLabel(page, /owner\s*name|owner/i);
-    const yearBuilt = await scrapeLabel(page, /year\s*built/i);
-
-    if (!ownerName && !yearBuilt) {
-      return res.status(404).json({ error: 'Property found but data could not be read.' });
-    }
-
-    console.log(`[lookup] owner="${ownerName}" yearBuilt="${yearBuilt}"`);
-    res.json({ ownerName: ownerName || 'N/A', yearBuilt: yearBuilt || 'N/A' });
+    console.log(`[lookup] yearBuilt=${yearBuilt}`);
+    res.json({ yearBuilt });
 
   } catch (err) {
     console.error('[lookup] error:', err.message);
@@ -230,36 +74,5 @@ app.post('/api/property-lookup', async (req, res) => {
   }
 });
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-async function findInput(page, selectors) {
-  for (const sel of selectors) {
-    try {
-      const loc = page.locator(sel).first();
-      if ((await loc.count()) > 0) return loc;
-    } catch (_) {}
-  }
-  return null;
-}
-
-async function scrapeLabel(page, labelRegex) {
-  const rows = page.locator('tr');
-  const count = await rows.count();
-  for (let i = 0; i < count; i++) {
-    const cells = rows.nth(i).locator('td, th');
-    const cellCount = await cells.count();
-    for (let c = 0; c < cellCount - 1; c++) {
-      const text = ((await cells.nth(c).textContent()) || '').trim();
-      if (labelRegex.test(text)) {
-        const val = ((await cells.nth(c + 1).textContent()) || '').trim().replace(/\s+/g, ' ');
-        if (val) return val;
-      }
-    }
-  }
-  return null;
-}
-
 // ── Start ─────────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`Servpro property lookup server on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server on port ${PORT}`));

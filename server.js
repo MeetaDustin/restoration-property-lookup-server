@@ -28,7 +28,8 @@ app.get('/debug/form', async (_req, res) => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
     const page = await context.newPage();
-    await page.goto(SEARCH_URL, { waitUntil: 'networkidle', timeout: 30_000 });
+    await page.goto(SEARCH_URL, { waitUntil: 'load', timeout: 30_000 });
+    await page.waitForTimeout(1500);
 
     // Return all inputs and their name/id/placeholder/type
     const inputs = await page.evaluate(() =>
@@ -65,7 +66,8 @@ app.get('/debug/search', async (req, res) => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
     const page = await context.newPage();
-    await page.goto(SEARCH_URL, { waitUntil: 'networkidle', timeout: 30_000 });
+    await page.goto(SEARCH_URL, { waitUntil: 'load', timeout: 30_000 });
+    await page.waitForTimeout(1500);
 
     // Dismiss modals
     for (let i = 0; i < 5; i++) {
@@ -81,7 +83,8 @@ app.get('/debug/search', async (req, res) => {
 
     await page.fill('#ctlBodyPane_ctl01_ctl01_txtAddress', address);
     await page.locator('#ctlBodyPane_ctl01_ctl01_btnSearch').click();
-    await page.waitForLoadState('networkidle', { timeout: 20_000 });
+    await page.waitForLoadState('load', { timeout: 20_000 });
+    await page.waitForTimeout(2000);
 
     const links = await page.evaluate(() =>
       Array.from(document.querySelectorAll('a[href]')).map(a => ({
@@ -136,7 +139,8 @@ app.post('/api/property-lookup', async (req, res) => {
     const page = await context.newPage();
 
     // ── 1. Load search page ───────────────────────────────────────────────────
-    await page.goto(SEARCH_URL, { waitUntil: 'networkidle', timeout: 30_000 });
+    await page.goto(SEARCH_URL, { waitUntil: 'load', timeout: 30_000 });
+    await page.waitForTimeout(1500);
 
     // ── 2. Dismiss any modals (Terms, Notices, etc.) ─────────────────────────
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -186,7 +190,8 @@ app.post('/api/property-lookup', async (req, res) => {
     } else {
       await page.locator('#ctlBodyPane_ctl01_ctl01_txtAddress').press('Enter');
     }
-    await page.waitForLoadState('networkidle', { timeout: 20_000 });
+    await page.waitForLoadState('load', { timeout: 20_000 });
+    await page.waitForTimeout(2000);
 
     // ── 5. Click first result ────────────────────────────────────────────────
     const resultLink = await findInput(page, [
@@ -203,7 +208,8 @@ app.post('/api/property-lookup', async (req, res) => {
     }
 
     await resultLink.click();
-    await page.waitForLoadState('networkidle', { timeout: 20_000 });
+    await page.waitForLoadState('load', { timeout: 20_000 });
+    await page.waitForTimeout(2000);
 
     // ── 6. Scrape owner & year built ──────────────────────────────────────────
     const ownerName = await scrapeLabel(page, /owner\s*name|owner/i);

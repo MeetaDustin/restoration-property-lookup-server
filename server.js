@@ -13,6 +13,42 @@ const SEARCH_URL =
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
+// ── Debug: inspect search page form ──────────────────────────────────────────
+app.get('/debug/form', async (_req, res) => {
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+    });
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    });
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    });
+    const page = await context.newPage();
+    await page.goto(SEARCH_URL, { waitUntil: 'networkidle', timeout: 30_000 });
+
+    // Return all inputs and their name/id/placeholder/type
+    const inputs = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('input, select, textarea')).map(el => ({
+        tag:  el.tagName,
+        type: el.type,
+        name: el.name,
+        id:   el.id,
+        placeholder: el.placeholder,
+        value: el.value,
+      }))
+    );
+    res.json({ url: page.url(), inputs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (browser) await browser.close();
+  }
+});
+
 // ── Property lookup ───────────────────────────────────────────────────────────
 app.post('/api/property-lookup', async (req, res) => {
   const { streetNumber, streetName } = req.body;

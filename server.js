@@ -89,35 +89,22 @@ app.post('/api/property-lookup', async (req, res) => {
     // ── 1. Load search page ───────────────────────────────────────────────────
     await page.goto(SEARCH_URL, { waitUntil: 'networkidle', timeout: 30_000 });
 
-    // ── 2. Fill street number ─────────────────────────────────────────────────
-    const stNoInput = await findInput(page, [
-      '[id*="txtStNo"]', '[id*="StNo"]', '[name*="stno" i]',
-    ]);
-    if (stNoInput) {
-      await stNoInput.fill(streetNumber);
-    } else {
-      await page.getByLabel(/street\s*(no|number|#)/i).first().fill(streetNumber);
-    }
+    // ── 2. Fill full address into the single address field ────────────────────
+    const fullAddress = `${streetNumber} ${streetName}`;
+    await page.fill('#ctlBodyPane_ctl01_ctl01_txtAddress', fullAddress);
 
-    // ── 3. Fill street name ───────────────────────────────────────────────────
-    const stNameInput = await findInput(page, [
-      '[id*="txtStName"]', '[id*="StName"]', '[name*="stname" i]',
-    ]);
-    if (stNameInput) {
-      await stNameInput.fill(streetName);
-    } else {
-      await page.getByLabel(/street\s*name/i).first().fill(streetName);
-    }
-
-    // ── 4. Submit ─────────────────────────────────────────────────────────────
+    // ── 3. Submit — try button first, fall back to Enter ─────────────────────
     const searchBtn = await findInput(page, [
-      'input[value="Search" i]', 'button:has-text("Search")',
-      '[id*="btnSearch"]', '[id*="cmdSearch"]',
+      '#ctlBodyPane_ctl01_ctl01_btnSearch',
+      'input[id*="ctl01"][value*="Search" i]',
+      'button[id*="ctl01"]:has-text("Search")',
+      'input[value="Search" i]',
+      'button:has-text("Search")',
     ]);
     if (searchBtn) {
       await searchBtn.click();
     } else {
-      await page.keyboard.press('Enter');
+      await page.locator('#ctlBodyPane_ctl01_ctl01_txtAddress').press('Enter');
     }
     await page.waitForLoadState('networkidle', { timeout: 20_000 });
 

@@ -89,11 +89,26 @@ app.post('/api/property-lookup', async (req, res) => {
     // ── 1. Load search page ───────────────────────────────────────────────────
     await page.goto(SEARCH_URL, { waitUntil: 'networkidle', timeout: 30_000 });
 
-    // ── 2. Fill full address into the single address field ────────────────────
+    // ── 2. Dismiss Terms & Conditions modal if present ───────────────────────
+    try {
+      const modal = page.locator('.modal.in, .modal[aria-label*="Terms" i]');
+      if (await modal.isVisible({ timeout: 5_000 })) {
+        const acceptBtn = modal.locator(
+          'button:has-text("Accept"), button:has-text("Agree"), button:has-text("OK"), button:has-text("Close"), .btn-primary'
+        ).first();
+        await acceptBtn.click();
+        await page.waitForSelector('.modal.in', { state: 'hidden', timeout: 5_000 });
+        console.log('[lookup] dismissed Terms modal');
+      }
+    } catch (_) {
+      // No modal — continue
+    }
+
+    // ── 3. Fill full address into the single address field ────────────────────
     const fullAddress = `${streetNumber} ${streetName}`;
     await page.fill('#ctlBodyPane_ctl01_ctl01_txtAddress', fullAddress);
 
-    // ── 3. Submit — try button first, fall back to Enter ─────────────────────
+    // ── 4. Submit — try button first, fall back to Enter ─────────────────────
     const searchBtn = await findInput(page, [
       '#ctlBodyPane_ctl01_ctl01_btnSearch',
       'input[id*="ctl01"][value*="Search" i]',
@@ -108,7 +123,7 @@ app.post('/api/property-lookup', async (req, res) => {
     }
     await page.waitForLoadState('networkidle', { timeout: 20_000 });
 
-    // ── 5. Click first result ─────────────────────────────────────────────────
+    // ── 5. Click first result ────────────────────────────────────────────────
     const resultLink = await findInput(page, [
       'table[id*="Grid"] tr:nth-child(2) a',
       'table[id*="Result"] tr:nth-child(2) a',

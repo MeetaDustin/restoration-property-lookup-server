@@ -89,19 +89,35 @@ app.post('/api/property-lookup', async (req, res) => {
     // ── 1. Load search page ───────────────────────────────────────────────────
     await page.goto(SEARCH_URL, { waitUntil: 'networkidle', timeout: 30_000 });
 
-    // ── 2. Dismiss Terms & Conditions modal if present ───────────────────────
-    try {
-      const modal = page.locator('.modal.in, .modal[aria-label*="Terms" i]');
-      if (await modal.isVisible({ timeout: 5_000 })) {
-        const acceptBtn = modal.locator(
-          'button:has-text("Accept"), button:has-text("Agree"), button:has-text("OK"), button:has-text("Close"), .btn-primary'
+    // ── 2. Dismiss any modals (Terms, Notices, etc.) ─────────────────────────
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const modal = page.locator('.modal.in').first();
+        if (!(await modal.isVisible({ timeout: 3_000 }))) break;
+
+        console.log(`[lookup] dismissing modal (attempt ${attempt + 1})`);
+
+        // Try clicking a close/accept button inside the modal
+        const closeBtn = modal.locator(
+          'button:has-text("Accept"), button:has-text("Agree"), ' +
+          'button:has-text("OK"), button:has-text("Close"), ' +
+          'button:has-text("Continue"), .btn-primary, button.close, [data-dismiss="modal"]'
         ).first();
-        await acceptBtn.click();
-        await page.waitForSelector('.modal.in', { state: 'hidden', timeout: 5_000 });
-        console.log('[lookup] dismissed Terms modal');
+
+        if (await closeBtn.isVisible({ timeout: 1_000 })) {
+          await closeBtn.click();
+        } else {
+          await page.keyboard.press('Escape');
+        }
+
+        await page.waitForFunction(
+          () => document.querySelectorAll('.modal.in').length === 0,
+          { timeout: 5_000 }
+        ).catch(() => {});
+
+      } catch (_) {
+        break;
       }
-    } catch (_) {
-      // No modal — continue
     }
 
     // ── 3. Fill full address into the single address field ────────────────────

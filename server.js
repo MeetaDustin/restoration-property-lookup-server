@@ -74,5 +74,49 @@ app.post('/api/property-lookup', async (req, res) => {
   }
 });
 
+// ── Debug: see what Zillow returns ────────────────────────────────────────────
+app.get('/debug/zillow', async (req, res) => {
+  const { street, city, state, zip } = req.query;
+  const query = [street, city, state, zip].filter(Boolean).join(', ');
+  const slug  = query.replace(/[^\w\s]/g, '').replace(/\s+/g, '-');
+  const url   = `https://www.zillow.com/homes/${slug}_rb/`;
+
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+    });
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 800 },
+    });
+    const page = await context.newPage();
+    await page.goto(url, { waitUntil: 'load', timeout: 30_000 });
+    await page.waitForTimeout(3000);
+
+    const finalUrl = page.url();
+    const title = await page.title();
+
+    const result = await page.evaluate(() => {
+      const el = document.getElementById('__NEXT_DATA__');
+      if (!el) return { found: false };
+      const str = el.textContent;
+      // Extract yearBuilt matches
+      const matches = [...str.matchAll(/"yearBuilt"\s*:\s*(\d+)/g)].map(m => m[1]);
+      // Also grab a snippet around yearBuilt
+      const idx = str.indexOf('"yearBuilt"');
+      const snippet = idx >= 0 ? str.substring(idx, idx + 100) : 'not found';
+      return { found: true, yearBuiltMatches: matches, snippet };
+    });
+
+    res.json({ requestedUrl: url, finalUrl, title, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (browser) await browser.close();
+  }
+});
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => console.log(`Server on port ${PORT}`));
